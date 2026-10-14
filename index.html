@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>台北找停車位</title>
+<title>揣車格仔</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
 :root {
@@ -38,6 +38,7 @@ h1 { font-size: 18px; margin: 0 0 10px; }
 .chip[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-text); }
 .btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; border-radius: 8px; font-size: 14px; cursor: pointer; }
 .btn:disabled { opacity: .5; cursor: default; }
+select { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 15px; }
 input[type=search] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 15px; }
 #status { font-size: 12px; color: var(--muted); }
 #status.err { color: var(--full); }
@@ -69,7 +70,10 @@ input[type=search] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid
 <body>
 <aside id="panel">
   <header>
-    <h1>台北找停車位</h1>
+    <h1>揣車格仔 · 找停車位</h1>
+    <div class="row">
+      <select id="city" aria-label="縣市"></select>
+    </div>
     <div class="row">
       <input type="search" id="q" placeholder="搜尋名稱或路名">
       <button class="btn" id="locate" title="定位到我的位置">📍 我的位置</button>
@@ -102,7 +106,19 @@ input[type=search] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid
 const API = 'https://tdx.transportdata.tw/api/basic/v1/Parking';
 const STATIC_TTL = 12 * 3600 * 1000; // 基本資料一天才更新，存 12 小時
 
-const state = { veh: 'car', kind: 'all', q: '', items: [], me: null, updated: null };
+// TDX 縣市代碼、中文名稱、地圖中心
+const CITIES = {
+  Taipei: ['臺北市', 25.0418, 121.5440], NewTaipei: ['新北市', 25.0120, 121.4650], Keelung: ['基隆市', 25.1283, 121.7419],
+  Taoyuan: ['桃園市', 24.9937, 121.3010], Hsinchu: ['新竹市', 24.8039, 120.9647], HsinchuCounty: ['新竹縣', 24.8270, 121.0128],
+  MiaoliCounty: ['苗栗縣', 24.5602, 120.8214], Taichung: ['臺中市', 24.1477, 120.6736], ChanghuaCounty: ['彰化縣', 24.0809, 120.5385],
+  NantouCounty: ['南投縣', 23.9096, 120.6839], YunlinCounty: ['雲林縣', 23.7092, 120.5434], Chiayi: ['嘉義市', 23.4801, 120.4491],
+  ChiayiCounty: ['嘉義縣', 23.4588, 120.2930], Tainan: ['臺南市', 22.9908, 120.2133], Kaohsiung: ['高雄市', 22.6273, 120.3014],
+  PingtungCounty: ['屏東縣', 22.6727, 120.4880], YilanCounty: ['宜蘭縣', 24.7570, 121.7533], HualienCounty: ['花蓮縣', 23.9769, 121.6044],
+  TaitungCounty: ['臺東縣', 22.7583, 121.1444], PenghuCounty: ['澎湖縣', 23.5711, 119.5793], KinmenCounty: ['金門縣', 24.4321, 118.3171],
+  LienchiangCounty: ['連江縣', 26.1602, 119.9517],
+};
+
+const state = { city: 'Taipei', veh: 'car', kind: 'all', q: '', items: [], me: null, updated: null };
 
 // ---------- storage helpers (可能被瀏覽器封鎖，全部包 try) ----------
 function load(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
@@ -111,39 +127,57 @@ function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); 
 async function getJSON(path) {
   const res = await fetch(API + path + (path.includes('?') ? '&' : '?') + '%24format=JSON');
   if (res.status === 429) throw new Error('今日免登入的查詢次數已用完，請稍後或明天再試');
+  if (res.status === 404) return null; // 這個縣市沒有這類資料
   if (!res.ok) throw new Error('資料讀取失敗（HTTP ' + res.status + '）');
   return res.json();
 }
 
 // 優先讀 GitHub Actions 定時產生的資料檔；本機開檔或檔案不存在時，改成直接查 TDX
-async function getPrebuilt() {
-  const res = await fetch('data/Taipei.json?t=' + Date.now());
+async function getPrebuilt(city) {
+  const res = await fetch('data/' + city + '.json?t=' + Date.now());
   if (!res.ok) throw new Error('no prebuilt data');
   const d = await res.json();
   return { items: d.items, time: d.updated, source: 'file' };
 }
 
-async function getStatic(force) {
-  const cached = load('tp-static-v1');
-  if (!force && cached && Date.now() - cached.t < STATIC_TTL) return cached;
+// 從 cities.json 取得有資料的縣市；讀不到就列出全部
+async function loadCityList() {
+  let list = Object.keys(CITIES);
+  try {
+    const res = await fetch('data/cities.json?t=' + Date.now());
+    if (res.ok) {
+      const ok = (await res.json()).filter(c => c.count > 0 && CITIES[c.city]).map(c => c.city);
+      if (ok.length) list = ok;
+    }
+  } catch {}
+  const sel = document.getElementById('city');
+  sel.innerHTML = list.map(c => `<option value="${c}">${CITIES[c][0]}</option>`).join('');
+  if (!list.includes(state.city)) state.city = list[0];
+  sel.value = state.city;
+}
+
+async function getStatic(city) {
+  const key = 'tp-static-v2-' + city;
+  const cached = load(key);
+  if (cached && Date.now() - cached.t < STATIC_TTL) return cached;
   const [lots, segs] = await Promise.all([
-    getJSON('/OffStreet/CarPark/City/Taipei?%24select=CarParkID,CarParkName,CarParkPosition,Address,FareDescription,Description'),
-    getJSON('/OnStreet/ParkingSegment/City/Taipei?%24select=ParkingSegmentID,ParkingSegmentName,ParkingSegmentPosition,FareDescription,Description'),
+    getJSON(`/OffStreet/CarPark/City/${city}?%24select=CarParkID,CarParkName,CarParkPosition,Address,FareDescription`),
+    getJSON(`/OnStreet/ParkingSegment/City/${city}?%24select=ParkingSegmentID,ParkingSegmentName,ParkingSegmentPosition,FareDescription,Description`),
   ]);
   const data = {
     t: Date.now(),
-    lots: lots.CarParks.map(p => ({
+    lots: (lots?.CarParks || []).map(p => ({
       k: 'lot', id: p.CarParkID, n: p.CarParkName?.Zh_tw || p.CarParkID,
       lat: p.CarParkPosition?.PositionLat, lon: p.CarParkPosition?.PositionLon,
       a: p.Address || '', f: p.FareDescription || '',
     })),
-    segs: segs.ParkingSegments.map(s => ({
+    segs: (segs?.ParkingSegments || []).map(s => ({
       k: 'street', id: s.ParkingSegmentID, n: s.ParkingSegmentName?.Zh_tw || s.ParkingSegmentID,
       lat: s.ParkingSegmentPosition?.PositionLat, lon: s.ParkingSegmentPosition?.PositionLon,
       a: s.Description || '', f: s.FareDescription || '',
     })),
   };
-  save('tp-static-v1', data);
+  save(key, data);
   return data;
 }
 
@@ -159,14 +193,14 @@ function spaces(rec) {
   return out;
 }
 
-async function getDirect() {
+async function getDirect(city) {
   const [st, la, sa] = await Promise.all([
-    getStatic(false),
-    getJSON('/OffStreet/ParkingAvailability/City/Taipei'),
-    getJSON('/OnStreet/ParkingSegmentAvailability/City/Taipei'),
+    getStatic(city),
+    getJSON(`/OffStreet/ParkingAvailability/City/${city}`),
+    getJSON(`/OnStreet/ParkingSegmentAvailability/City/${city}`),
   ]);
-  const lots = new Map(la.ParkingAvailabilities.map(p => [p.CarParkID, p]));
-  const segs = new Map(sa.CurbParkingSegmentAvailabilities.map(s => [s.ParkingSegmentID, s]));
+  const lots = new Map((la?.ParkingAvailabilities || []).map(p => [p.CarParkID, p]));
+  const segs = new Map((sa?.CurbParkingSegmentAvailabilities || []).map(s => [s.ParkingSegmentID, s]));
   return {
     items: [
       ...st.lots.map(p => ({ ...p, ...spaces(lots.get(p.id)) })),
@@ -275,13 +309,13 @@ map.on('moveend', () => { if (!state.me) renderList(); });
 document.querySelectorAll('[data-veh]').forEach(b => b.onclick = () => {
   state.veh = b.dataset.veh;
   document.querySelectorAll('[data-veh]').forEach(x => x.setAttribute('aria-pressed', x === b));
-  save('tp-prefs', { veh: state.veh, kind: state.kind });
+  savePrefs();
   render();
 });
 document.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => {
   state.kind = b.dataset.kind;
   document.querySelectorAll('[data-kind]').forEach(x => x.setAttribute('aria-pressed', x === b));
-  save('tp-prefs', { veh: state.veh, kind: state.kind });
+  savePrefs();
   render();
 });
 let qTimer;
@@ -303,6 +337,15 @@ document.getElementById('locate').onclick = () => {
   }, () => setStatus('無法取得位置，請確認已允許定位權限', true), { enableHighAccuracy: true, timeout: 10000 });
 };
 document.getElementById('refresh').onclick = () => refresh();
+document.getElementById('city').onchange = e => {
+  state.city = e.target.value;
+  savePrefs();
+  const [, lat, lon] = CITIES[state.city];
+  map.setView([lat, lon], 14);
+  refresh();
+};
+
+function savePrefs() { save('tp-prefs', { city: state.city, veh: state.veh, kind: state.kind }); }
 
 function setStatus(msg, err) {
   const el = document.getElementById('status');
@@ -312,7 +355,10 @@ function statusText() {
   if (!state.updated) return '';
   const t = new Date(state.updated);
   const hint = state.source === 'file' ? '每 30 分鐘自動更新' : '按「重新整理」取得最新空位';
-  return '資料時間 ' + t.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' · ' + hint;
+  const time = t.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  const day = t.toDateString() === new Date().toDateString() ? '' : (t.getMonth() + 1) + '/' + t.getDate() + ' ';
+  const live = state.items.some(i => i.car?.[1] != null || i.motor?.[1] != null);
+  return (live ? '資料時間 ' + day + time : CITIES[state.city][0] + '目前沒有即時空位資料，只顯示停車地點') + ' · ' + hint;
 }
 
 async function refresh() {
@@ -321,7 +367,7 @@ async function refresh() {
   setStatus('讀取最新空位中…');
   try {
     let data;
-    try { data = await getPrebuilt(); } catch { data = await getDirect(); }
+    try { data = await getPrebuilt(state.city); } catch { data = await getDirect(state.city); }
     state.items = data.items.filter(x => x.lat && x.lon);
     state.updated = data.time;
     state.source = data.source;
@@ -337,10 +383,15 @@ async function refresh() {
 // 還原上次的篩選
 const prefs = load('tp-prefs');
 if (prefs) {
+  if (CITIES[prefs.city]) state.city = prefs.city;
   if (prefs.veh) document.querySelector(`[data-veh="${prefs.veh}"]`)?.click();
   if (prefs.kind) document.querySelector(`[data-kind="${prefs.kind}"]`)?.click();
 }
-refresh();
+loadCityList().then(() => {
+  const [, lat, lon] = CITIES[state.city];
+  map.setView([lat, lon], state.city === 'Taipei' ? 15 : 14);
+  refresh();
+});
 </script>
 </body>
 </html>

@@ -28,6 +28,7 @@ async function getToken() {
 async function getJSON(path, token) {
   const url = API + path + (path.includes('?') ? '&' : '?') + '%24format=JSON';
   for (let attempt = 1; ; attempt++) {
+    await sleep(300); // 放慢速度，避免超過每秒呼叫上限
     const res = await fetch(url, { headers: token ? { authorization: 'Bearer ' + token } : {} });
     if (res.ok) return res.json();
     if (res.status === 404) { console.warn('  無資料：' + path); return null; }
