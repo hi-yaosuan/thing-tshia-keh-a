@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>台北找停車位</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d232b; --muted: #66707c; --line: #e3e6ea;
+  --accent: #2563eb; --ok: #16a34a; --warn: #d97706; --full: #dc2626; --unknown: #9aa3ad;
+  --chip: #eef1f5; --chip-on: #1d232b; --chip-on-text: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111418; --panel: #1a1f25; --text: #e8ebef; --muted: #9aa3ad; --line: #2b323a;
+    --accent: #60a5fa; --ok: #22c55e; --warn: #f59e0b; --full: #ef4444; --unknown: #6b7480;
+    --chip: #252b33; --chip-on: #e8ebef; --chip-on-text: #111418;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111418; --panel: #1a1f25; --text: #e8ebef; --muted: #9aa3ad; --line: #2b323a;
+  --accent: #60a5fa; --ok: #22c55e; --warn: #f59e0b; --full: #ef4444; --unknown: #6b7480;
+  --chip: #252b33; --chip-on: #e8ebef; --chip-on-text: #111418;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+  display: grid; grid-template-columns: 380px 1fr; height: 100dvh; overflow: hidden;
+}
+#panel { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+header { padding: 16px 16px 10px; border-bottom: 1px solid var(--line); }
+h1 { font-size: 18px; margin: 0 0 10px; }
+.row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.chip { border: 0; background: var(--chip); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 14px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-text); }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 6px 12px; border-radius: 8px; font-size: 14px; cursor: pointer; }
+.btn:disabled { opacity: .5; cursor: default; }
+input[type=search] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 15px; }
+#status { font-size: 12px; color: var(--muted); }
+#status.err { color: var(--full); }
+#list { overflow-y: auto; flex: 1; min-height: 0; margin: 0; padding: 0; list-style: none; }
+#list li { padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; }
+#list li:hover { background: var(--bg); }
+.name { font-weight: 600; font-size: 15px; }
+.sub { font-size: 12px; color: var(--muted); grid-column: 1; }
+.count { grid-row: 1 / span 2; grid-column: 2; align-self: center; text-align: right; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.count small { display: block; font-size: 11px; font-weight: 400; color: var(--muted); }
+.legend { display: flex; gap: 12px; font-size: 12px; color: var(--muted); }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: -1px; }
+#map { height: 100%; background: var(--bg); }
+.leaflet-popup-content { font-size: 14px; line-height: 1.5; margin: 12px 14px; }
+.leaflet-popup-content b { font-size: 15px; }
+.pop-count { font-size: 18px; font-weight: 700; }
+.pop a { color: var(--accent); }
+.empty { padding: 24px 16px; color: var(--muted); font-size: 14px; }
+
+@media (max-width: 760px) {
+  body { grid-template-columns: 1fr; grid-template-rows: 1fr 46dvh; }
+  #map { grid-row: 1; }
+  #panel { grid-row: 2; border-right: 0; border-top: 1px solid var(--line); }
+  header { padding: 10px 16px 6px; }
+  h1 { display: none; }
+}
+</style>
+</head>
+<body>
+<aside id="panel">
+  <header>
+    <h1>台北找停車位</h1>
+    <div class="row">
+      <input type="search" id="q" placeholder="搜尋名稱或路名">
+      <button class="btn" id="locate" title="定位到我的位置">📍 我的位置</button>
+    </div>
+    <div class="row" role="group" aria-label="車種">
+      <button class="chip" data-veh="car" aria-pressed="true">汽車</button>
+      <button class="chip" data-veh="motor" aria-pressed="false">機車</button>
+      <span style="width:8px"></span>
+      <button class="chip" data-kind="all" aria-pressed="true">全部</button>
+      <button class="chip" data-kind="lot" aria-pressed="false">停車場</button>
+      <button class="chip" data-kind="street" aria-pressed="false">路邊</button>
+    </div>
+    <div class="row" style="justify-content:space-between">
+      <div class="legend">
+        <span><i class="dot" style="background:var(--ok)"></i>有位</span>
+        <span><i class="dot" style="background:var(--warn)"></i>快滿</span>
+        <span><i class="dot" style="background:var(--full)"></i>已滿</span>
+        <span><i class="dot" style="background:var(--unknown)"></i>無資料</span>
+      </div>
+      <button class="btn" id="refresh">↻ 重新整理</button>
+    </div>
+    <div id="status">載入中…</div>
+  </header>
+  <ul id="list"></ul>
+</aside>
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const API = 'https://tdx.transportdata.tw/api/basic/v1/Parking';
+const STATIC_TTL = 12 * 3600 * 1000; // 基本資料一天才更新，存 12 小時
+const SPACE = { car: 1, motor: 2 };
+
+const state = { veh: 'car', kind: 'all', q: '', items: [], me: null, updated: null };
+
+// ---------- storage helpers (可能被瀏覽器封鎖，全部包 try) ----------
+function load(key) { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } }
+function save(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }
+
+async function getJSON(path) {
+  const res = await fetch(API + path + (path.includes('?') ? '&' : '?') + '%24format=JSON');
+  if (res.status === 429) throw new Error('今日免登入的查詢次數已用完，請稍後或明天再試');
+  if (!res.ok) throw new Error('資料讀取失敗（HTTP ' + res.status + '）');
+  return res.json();
+}
+
+async function getStatic(force) {
+  const cached = load('tp-static-v1');
+  if (!force && cached && Date.now() - cached.t < STATIC_TTL) return cached;
+  const [lots, segs] = await Promise.all([
+    getJSON('/OffStreet/CarPark/City/Taipei?%24select=CarParkID,CarParkName,CarParkPosition,Address,FareDescription,Description'),
+    getJSON('/OnStreet/ParkingSegment/City/Taipei?%24select=ParkingSegmentID,ParkingSegmentName,ParkingSegmentPosition,FareDescription,Description'),
+  ]);
+  const data = {
+    t: Date.now(),
+    lots: lots.CarParks.map(p => ({
+      id: p.CarParkID, name: p.CarParkName?.Zh_tw || p.CarParkID,
+      lat: p.CarParkPosition?.PositionLat, lon: p.CarParkPosition?.PositionLon,
+      addr: p.Address || '', fare: p.FareDescription || '', desc: p.Description || '',
+    })),
+    segs: segs.ParkingSegments.map(s => ({
+      id: s.ParkingSegmentID, name: s.ParkingSegmentName?.Zh_tw || s.ParkingSegmentID,
+      lat: s.ParkingSegmentPosition?.PositionLat, lon: s.ParkingSegmentPosition?.PositionLon,
+      addr: s.Description || '', fare: s.FareDescription || '', desc: '',
+    })),
+  };
+  save('tp-static-v1', data);
+  return data;
+}
+
+function byType(list) {
+  const out = {};
+  for (const a of list || []) out[a.SpaceType] = { n: a.NumberOfSpaces, a: a.AvailableSpaces };
+  return out;
+}
+
+async function getLive() {
+  const [la, sa] = await Promise.all([
+    getJSON('/OffStreet/ParkingAvailability/City/Taipei'),
+    getJSON('/OnStreet/ParkingSegmentAvailability/City/Taipei'),
+  ]);
+  const lots = {}, segs = {};
+  for (const p of la.ParkingAvailabilities) {
+    const t = byType(p.Availabilities);
+    if (!t[1] && p.TotalSpaces > 0) t[1] = { n: p.TotalSpaces, a: p.AvailableSpaces };
+    lots[p.CarParkID] = { t, service: p.ServiceStatus };
+  }
+  for (const s of sa.CurbParkingSegmentAvailabilities) {
+    const t = byType(s.Availabilities);
+    if (!t[1] && s.TotalSpaces > 0) t[1] = { n: s.TotalSpaces, a: s.AvailableSpaces };
+    segs[s.ParkingSegmentID] = { t, service: s.ServiceStatus };
+  }
+  return { lots, segs, time: la.SrcUpdateTime || la.UpdateTime };
+}
+
+// ---------- 計算 ----------
+function counts(item) {
+  const c = item.live?.t?.[SPACE[state.veh]];
+  if (!c || c.n == null || c.n <= 0) return null;
+  return { n: c.n, a: c.a == null || c.a < 0 ? null : Math.min(c.a, c.n) };
+}
+function level(c) {
+  if (!c || c.a == null) return 'unknown';
+  if (c.a === 0) return 'full';
+  if (c.a <= 3 || c.a / c.n < 0.1) return 'warn';
+  return 'ok';
+}
+function dist(a, b) {
+  const R = 6371000, r = Math.PI / 180;
+  const dLat = (b.lat - a.lat) * r, dLon = (b.lon - a.lon) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function fmtDist(m) { return m < 1000 ? Math.round(m) + ' 公尺' : (m / 1000).toFixed(1) + ' 公里'; }
+function esc(s) { return String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch])); }
+function color(lv) { return getComputedStyle(document.documentElement).getPropertyValue('--' + lv).trim(); }
+
+// ---------- 地圖 ----------
+const map = L.map('map', { preferCanvas: true, zoomControl: true }).setView([25.0418, 121.5440], 15);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '&copy; OpenStreetMap · 資料：交通部 TDX',
+}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+let meMarker = null;
+
+function visible(item) {
+  if (state.kind !== 'all' && item.kind !== state.kind) return false;
+  if (state.veh === 'motor' && !counts(item)) return false;
+  if (state.q && !(item.name + item.addr).includes(state.q)) return false;
+  return true;
+}
+
+function popupHtml(item) {
+  const c = counts(item), lv = level(c);
+  const num = c ? (c.a == null ? '— / ' + c.n : c.a + ' / ' + c.n) : '無即時資料';
+  const nav = `https://www.google.com/maps/dir/?api=1&destination=${item.lat},${item.lon}`;
+  return `<div class="pop"><b>${esc(item.name)}</b><br>
+    <span style="color:var(--muted)">${item.kind === 'lot' ? '停車場' : '路邊停車'} · ${state.veh === 'car' ? '汽車' : '機車'}</span><br>
+    <span class="pop-count" style="color:${color(lv)}">${num}</span> <span style="color:var(--muted)">剩餘 / 總格數</span><br>
+    ${item.addr ? esc(item.addr) + '<br>' : ''}
+    ${item.fare ? '💲 ' + esc(item.fare) + '<br>' : ''}
+    <a href="${nav}" target="_blank" rel="noopener">🧭 Google 地圖導航</a></div>`;
+}
+
+function render() {
+  layer.clearLayers();
+  for (const item of state.items) {
+    if (!visible(item)) continue;
+    const lv = level(counts(item));
+    L.circleMarker([item.lat, item.lon], {
+      radius: item.kind === 'lot' ? 8 : 6, weight: item.kind === 'lot' ? 2 : 1,
+      color: item.kind === 'lot' ? '#ffffff' : color(lv), fillColor: color(lv), fillOpacity: .9,
+    }).bindPopup(() => popupHtml(item)).addTo(layer);
+  }
+  renderList();
+}
+
+function renderList() {
+  const center = state.me || { lat: map.getCenter().lat, lon: map.getCenter().lng };
+  const ranked = state.items.filter(visible)
+    .map(item => ({ item, d: dist(center, item) }))
+    .sort((a, b) => {
+      // 有空位的排前面，再依距離
+      const fa = level(counts(a.item)) === 'full', fb = level(counts(b.item)) === 'full';
+      return fa === fb ? a.d - b.d : fa - fb;
+    })
+    .slice(0, 40);
+  const ul = document.getElementById('list');
+  if (!ranked.length) { ul.innerHTML = '<li class="empty">附近找不到符合條件的停車位</li>'; return; }
+  ul.innerHTML = ranked.map(({ item, d }, i) => {
+    const c = counts(item), lv = level(c);
+    const num = c && c.a != null ? c.a : '—';
+    return `<li data-i="${state.items.indexOf(item)}">
+      <span class="name">${esc(item.name)}</span>
+      <span class="count" style="color:${color(lv)}">${num}<small>${c ? '共 ' + c.n + ' 格' : '無資料'}</small></span>
+      <span class="sub">${item.kind === 'lot' ? '停車場' : '路邊'} · ${fmtDist(d)}${state.me ? '' : '（距地圖中心）'}</span>
+    </li>`;
+  }).join('');
+}
+
+document.getElementById('list').addEventListener('click', e => {
+  const li = e.target.closest('li[data-i]');
+  if (!li) return;
+  const item = state.items[+li.dataset.i];
+  map.setView([item.lat, item.lon], Math.max(map.getZoom(), 17));
+  L.popup().setLatLng([item.lat, item.lon]).setContent(popupHtml(item)).openOn(map);
+});
+map.on('moveend', () => { if (!state.me) renderList(); });
+
+// ---------- 控制項 ----------
+document.querySelectorAll('[data-veh]').forEach(b => b.onclick = () => {
+  state.veh = b.dataset.veh;
+  document.querySelectorAll('[data-veh]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  save('tp-prefs', { veh: state.veh, kind: state.kind });
+  render();
+});
+document.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => {
+  state.kind = b.dataset.kind;
+  document.querySelectorAll('[data-kind]').forEach(x => x.setAttribute('aria-pressed', x === b));
+  save('tp-prefs', { veh: state.veh, kind: state.kind });
+  render();
+});
+let qTimer;
+document.getElementById('q').addEventListener('input', e => {
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => { state.q = e.target.value.trim(); render(); }, 200);
+});
+document.getElementById('locate').onclick = () => {
+  if (!navigator.geolocation) return setStatus('這個瀏覽器不支援定位', true);
+  setStatus('定位中…');
+  navigator.geolocation.getCurrentPosition(pos => {
+    state.me = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    if (meMarker) meMarker.remove();
+    meMarker = L.circleMarker([state.me.lat, state.me.lon], { radius: 9, color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 })
+      .bindTooltip('我的位置').addTo(map);
+    map.setView([state.me.lat, state.me.lon], 16);
+    setStatus(statusText());
+    renderList();
+  }, () => setStatus('無法取得位置，請確認已允許定位權限', true), { enableHighAccuracy: true, timeout: 10000 });
+};
+document.getElementById('refresh').onclick = () => refresh();
+
+function setStatus(msg, err) {
+  const el = document.getElementById('status');
+  el.textContent = msg; el.className = err ? 'err' : '';
+}
+function statusText() {
+  if (!state.updated) return '';
+  const t = new Date(state.updated);
+  return '資料時間 ' + t.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' · 按「重新整理」取得最新空位';
+}
+
+async function refresh() {
+  const btn = document.getElementById('refresh');
+  btn.disabled = true;
+  setStatus('讀取最新空位中…');
+  try {
+    const [st, live] = await Promise.all([getStatic(false), getLive()]);
+    state.items = [
+      ...st.lots.map(p => ({ ...p, kind: 'lot', live: live.lots[p.id] })),
+      ...st.segs.map(s => ({ ...s, kind: 'street', live: live.segs[s.id] })),
+    ].filter(x => x.lat && x.lon);
+    state.updated = live.time;
+    setStatus(statusText());
+    render();
+  } catch (e) {
+    setStatus(e.message || '讀取失敗，請檢查網路', true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// 還原上次的篩選
+const prefs = load('tp-prefs');
+if (prefs) {
+  if (prefs.veh) document.querySelector(`[data-veh="${prefs.veh}"]`)?.click();
+  if (prefs.kind) document.querySelector(`[data-kind="${prefs.kind}"]`)?.click();
+}
+refresh();
+</script>
+</body>
+</html>
