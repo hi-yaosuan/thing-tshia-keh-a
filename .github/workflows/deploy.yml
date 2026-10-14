@@ -1,0 +1,50 @@
+# 每 30 分鐘從 TDX 抓一次停車資料，連同網頁一起發布到 GitHub Pages
+name: 更新停車資料並發布網站
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # GitHub 尖峰時段可能會延遲幾分鐘
+  workflow_dispatch:          # 可以在 Actions 頁面手動執行
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 抓取 TDX 停車資料
+        env:
+          TDX_CLIENT_ID: ${{ secrets.TDX_CLIENT_ID }}
+          TDX_CLIENT_SECRET: ${{ secrets.TDX_CLIENT_SECRET }}
+          CITIES: Taipei
+        run: |
+          mkdir -p site
+          cp index.html site/
+          node scripts/fetch-data.mjs site/data
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
