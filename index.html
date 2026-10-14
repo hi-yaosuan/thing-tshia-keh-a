@@ -137,7 +137,7 @@ async function getPrebuilt(city) {
   const res = await fetch('data/' + city + '.json?t=' + Date.now());
   if (!res.ok) throw new Error('no prebuilt data');
   const d = await res.json();
-  return { items: d.items, time: d.updated, source: 'file' };
+  return { items: d.items, time: d.updated, times: d.times || {}, source: 'file' };
 }
 
 // 從 cities.json 取得有資料的縣市；讀不到就列出全部
@@ -212,10 +212,22 @@ async function getDirect(city) {
 }
 
 // ---------- 計算 ----------
+// 空位資料超過 3 小時沒更新就當作過期（例如來源停擺），不顯示空位數
+const STALE_MS = 3 * 3600 * 1000;
+function isStale(kind) {
+  const t = state.times?.[kind];
+  return !!t && Date.now() - new Date(t).getTime() > STALE_MS;
+}
 function counts(item) {
   const c = item[state.veh];
   if (!c || !(c[0] > 0)) return null;
+  if (isStale(item.k)) return { n: c[0], a: null, stale: true };
   return { n: c[0], a: c[1] == null || c[1] < 0 ? null : Math.min(c[1], c[0]) };
+}
+function fmtTime(t) {
+  const d = new Date(t);
+  const time = d.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date().toDateString() ? time : (d.getMonth() + 1) + '/' + d.getDate() + ' ' + time;
 }
 function level(c) {
   if (!c || c.a == null) return 'unknown';
@@ -251,10 +263,11 @@ function visible(item) {
 function popupHtml(item) {
   const c = counts(item), lv = level(c);
   const num = c ? (c.a == null ? '— / ' + c.n : c.a + ' / ' + c.n) : '無即時資料';
+  const staleNote = c?.stale ? `<br><span style="color:var(--warn)">空位資料停在 ${fmtTime(state.times[item.k])}，已過期</span>` : '';
   const nav = `https://www.google.com/maps/dir/?api=1&destination=${item.lat},${item.lon}`;
   return `<div class="pop"><b>${esc(item.n)}</b><br>
     <span style="color:var(--muted)">${item.k === 'lot' ? '停車場' : '路邊停車'} · ${state.veh === 'car' ? '汽車' : '機車'}</span><br>
-    <span class="pop-count" style="color:${color(lv)}">${num}</span> <span style="color:var(--muted)">剩餘 / 總格數</span><br>
+    <span class="pop-count" style="color:${color(lv)}">${num}</span> <span style="color:var(--muted)">剩餘 / 總格數</span>${staleNote}<br>
     ${item.a ? esc(item.a) + '<br>' : ''}
     ${item.f ? '💲 ' + esc(item.f) + '<br>' : ''}
     <a href="${nav}" target="_blank" rel="noopener">🧭 Google 地圖導航</a></div>`;
@@ -290,7 +303,7 @@ function renderList() {
     const num = c && c.a != null ? c.a : '—';
     return `<li data-i="${state.items.indexOf(item)}">
       <span class="name">${esc(item.n)}</span>
-      <span class="count" style="color:${color(lv)}">${num}<small>${c ? '共 ' + c.n + ' 格' : '無資料'}</small></span>
+      <span class="count" style="color:${color(lv)}">${num}<small>${c ? (c.stale ? '資料過期' : '共 ' + c.n + ' 格') : '無資料'}</small></span>
       <span class="sub">${item.k === 'lot' ? '停車場' : '路邊'} · ${fmtDist(d)}${state.me ? '' : '（距地圖中心）'}</span>
     </li>`;
   }).join('');
@@ -353,12 +366,12 @@ function setStatus(msg, err) {
 }
 function statusText() {
   if (!state.updated) return '';
-  const t = new Date(state.updated);
   const hint = state.source === 'file' ? '每 30 分鐘自動更新' : '按「重新整理」取得最新空位';
-  const time = t.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
-  const day = t.toDateString() === new Date().toDateString() ? '' : (t.getMonth() + 1) + '/' + t.getDate() + ' ';
   const live = state.items.some(i => i.car?.[1] != null || i.motor?.[1] != null);
-  return (live ? '資料時間 ' + day + time : CITIES[state.city][0] + '目前沒有即時空位資料，只顯示停車地點') + ' · ' + hint;
+  if (!live) return CITIES[state.city][0] + '目前沒有即時空位資料，只顯示停車地點';
+  const stale = ['lot', 'street'].filter(isStale).map(k => (k === 'lot' ? '停車場' : '路邊') + '空位資料停在 ' + fmtTime(state.times[k]));
+  if (stale.length) return '⚠️ ' + stale.join('、') + '，已過期以灰色顯示';
+  return '資料時間 ' + fmtTime(state.updated) + ' · ' + hint;
 }
 
 async function refresh() {
@@ -370,6 +383,7 @@ async function refresh() {
     try { data = await getPrebuilt(state.city); } catch { data = await getDirect(state.city); }
     state.items = data.items.filter(x => x.lat && x.lon);
     state.updated = data.time;
+    state.times = data.times || {};
     state.source = data.source;
     setStatus(statusText());
     render();
