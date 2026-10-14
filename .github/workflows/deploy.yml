@@ -20,6 +20,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -29,6 +30,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      # 停車場位置、名稱等基本資料存在快取，一天只向 TDX 抓一次
+      - uses: actions/cache@v4
+        with:
+          path: .cache
+          key: tdx-static-${{ github.run_id }}
+          restore-keys: tdx-static-
 
       - name: 抓取 TDX 停車資料
         env:
