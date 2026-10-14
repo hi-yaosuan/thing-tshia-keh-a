@@ -99,6 +99,62 @@ async function getTaipeiOwn() {
   }
 }
 
+// TWD97 二度分帶（TM2，中央經線 121°）座標轉經緯度
+function twd97ToWgs84(x, y) {
+  const a = 6378137, b = 6356752.314245, k0 = 0.9999, lon0 = 121 * Math.PI / 180, dx = 250000;
+  const e = Math.sqrt(1 - (b * b) / (a * a)), e2 = (e * a / b) ** 2;
+  x -= dx;
+  const mu = y / k0 / (a * (1 - e ** 2 / 4 - 3 * e ** 4 / 64 - 5 * e ** 6 / 256));
+  const e1 = (1 - Math.sqrt(1 - e * e)) / (1 + Math.sqrt(1 - e * e));
+  const fp = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * Math.sin(2 * mu) + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * Math.sin(4 * mu)
+    + (151 * e1 ** 3 / 96) * Math.sin(6 * mu) + (1097 * e1 ** 4 / 512) * Math.sin(8 * mu);
+  const C1 = e2 * Math.cos(fp) ** 2, T1 = Math.tan(fp) ** 2;
+  const R1 = a * (1 - e * e) / Math.pow(1 - e * e * Math.sin(fp) ** 2, 1.5);
+  const N1 = a / Math.sqrt(1 - e * e * Math.sin(fp) ** 2);
+  const D = x / (N1 * k0);
+  const lat = fp - (N1 * Math.tan(fp) / R1) * (D * D / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * e2) * D ** 4 / 24
+    + (61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 3 * C1 * C1 - 252 * e2) * D ** 6 / 720);
+  const lon = lon0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6 + (5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * e2 + 24 * T1 * T1) * D ** 5 / 120) / Math.cos(fp);
+  return [+(lat * 180 / Math.PI).toFixed(6), +(lon * 180 / Math.PI).toFixed(6)];
+}
+
+// 新北市的停車場不在 TDX 裡，改從新北市政府資料開放平臺抓（不需金鑰、不佔 TDX 額度）
+async function getNtpcDataset(id) {
+  const rows = [];
+  for (let page = 0; page < 30; page++) {
+    const res = await fetch(`https://data.ntpc.gov.tw/api/datasets/${id}/json?page=${page}&size=1000`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const batch = JSON.parse((await res.text()).replace(/^﻿/, ''));
+    rows.push(...batch);
+    if (batch.length < 1000) break;
+  }
+  return rows;
+}
+
+async function getNewTaipeiLots() {
+  try {
+    const [lots, live] = [
+      await getNtpcDataset('b1464ef0-9c7c-4a6f-abf7-6bdf32847e68'), // 新北市路外公共停車場資訊
+      await getNtpcDataset('e09b35a5-a738-48cc-b0f5-570b67ad9c78'), // 新北市公有路外停車場即時賸餘車位數
+    ];
+    const avail = new Map(live.map(r => [r.ID, Number(r.AVAILABLECAR)]));
+    const items = [];
+    for (const p of lots) {
+      const x = Number(p.TW97X), y = Number(p.TW97Y);
+      if (!(x > 0 && y > 0)) continue;
+      const [lat, lon] = twd97ToWgs84(x, y);
+      const car = Number(p.TOTALCAR), motor = Number(p.TOTALMOTOR), a = avail.get(p.ID);
+      items.push({ k: 'lot', id: 'NTPC' + p.ID, n: p.NAME, lat, lon, a: p.ADDRESS || '', f: (p.PAYEX || '').replace(/;$/, ''),
+        ...(car > 0 ? { car: [car, a >= 0 ? a : null] } : {}),
+        ...(motor > 0 ? { motor: [motor, null] } : {}) });
+    }
+    return { items, time: new Date().toISOString() };
+  } catch (e) {
+    console.log('  新北市開放資料讀取失敗：' + e.message);
+    return null;
+  }
+}
+
 function latest(...times) {
   const ts = times.filter(Boolean).map(t => new Date(t).getTime()).filter(n => !isNaN(n));
   return ts.length ? new Date(Math.max(...ts)).toISOString() : null;
@@ -125,6 +181,12 @@ async function fetchCity(city, token) {
     items.push({ k: 'lot', id: p.CarParkID, n: p.CarParkName?.Zh_tw || p.CarParkID, lat, lon,
       a: p.Address || '', f: p.FareDescription || '', ...sp });
   }
+  const ntpc = city === 'NewTaipei' ? await getNewTaipeiLots() : null;
+  if (ntpc) {
+    // 以新北市自己的停車場資料為準，取代 TDX 的（目前 TDX 沒有新北停車場）
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].k === 'lot') items.splice(i, 1);
+    items.push(...ntpc.items);
+  }
   for (const s of st.segs) {
     const lat = s.ParkingSegmentPosition?.PositionLat, lon = s.ParkingSegmentPosition?.PositionLon;
     if (!lat || !lon) continue;
@@ -133,7 +195,7 @@ async function fetchCity(city, token) {
   }
   // 停車場和路邊各自記錄資料時間，網頁用來判斷資料是否過期
   const times = {
-    lot: own?.time || lotLive?.SrcUpdateTime || null,
+    lot: own?.time || ntpc?.time || lotLive?.SrcUpdateTime || null,
     street: segLive?.SrcUpdateTime || null,
   };
   return { city, updated: latest(times.lot, times.street), times, generated: new Date().toISOString(), items };
