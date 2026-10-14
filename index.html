@@ -101,7 +101,6 @@ input[type=search] { flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid
 <script>
 const API = 'https://tdx.transportdata.tw/api/basic/v1/Parking';
 const STATIC_TTL = 12 * 3600 * 1000; // 基本資料一天才更新，存 12 小時
-const SPACE = { car: 1, motor: 2 };
 
 const state = { veh: 'car', kind: 'all', q: '', items: [], me: null, updated: null };
 
@@ -116,6 +115,14 @@ async function getJSON(path) {
   return res.json();
 }
 
+// 優先讀 GitHub Actions 定時產生的資料檔；本機開檔或檔案不存在時，改成直接查 TDX
+async function getPrebuilt() {
+  const res = await fetch('data/Taipei.json?t=' + Date.now());
+  if (!res.ok) throw new Error('no prebuilt data');
+  const d = await res.json();
+  return { items: d.items, time: d.updated, source: 'file' };
+}
+
 async function getStatic(force) {
   const cached = load('tp-static-v1');
   if (!force && cached && Date.now() - cached.t < STATIC_TTL) return cached;
@@ -126,50 +133,55 @@ async function getStatic(force) {
   const data = {
     t: Date.now(),
     lots: lots.CarParks.map(p => ({
-      id: p.CarParkID, name: p.CarParkName?.Zh_tw || p.CarParkID,
+      k: 'lot', id: p.CarParkID, n: p.CarParkName?.Zh_tw || p.CarParkID,
       lat: p.CarParkPosition?.PositionLat, lon: p.CarParkPosition?.PositionLon,
-      addr: p.Address || '', fare: p.FareDescription || '', desc: p.Description || '',
+      a: p.Address || '', f: p.FareDescription || '',
     })),
     segs: segs.ParkingSegments.map(s => ({
-      id: s.ParkingSegmentID, name: s.ParkingSegmentName?.Zh_tw || s.ParkingSegmentID,
+      k: 'street', id: s.ParkingSegmentID, n: s.ParkingSegmentName?.Zh_tw || s.ParkingSegmentID,
       lat: s.ParkingSegmentPosition?.PositionLat, lon: s.ParkingSegmentPosition?.PositionLon,
-      addr: s.Description || '', fare: s.FareDescription || '', desc: '',
+      a: s.Description || '', f: s.FareDescription || '',
     })),
   };
   save('tp-static-v1', data);
   return data;
 }
 
-function byType(list) {
+// 與 scripts/fetch-data.mjs 的 spaces() 相同：{ car: [總數, 剩餘], motor: [總數, 剩餘] }
+function spaces(rec) {
   const out = {};
-  for (const a of list || []) out[a.SpaceType] = { n: a.NumberOfSpaces, a: a.AvailableSpaces };
+  for (const a of rec?.Availabilities || []) {
+    if (a.NumberOfSpaces > 0 && (a.SpaceType === 1 || a.SpaceType === 2)) {
+      out[a.SpaceType === 1 ? 'car' : 'motor'] = [a.NumberOfSpaces, a.AvailableSpaces < 0 ? null : a.AvailableSpaces];
+    }
+  }
+  if (!out.car && rec?.TotalSpaces > 0) out.car = [rec.TotalSpaces, rec.AvailableSpaces < 0 ? null : rec.AvailableSpaces];
   return out;
 }
 
-async function getLive() {
-  const [la, sa] = await Promise.all([
+async function getDirect() {
+  const [st, la, sa] = await Promise.all([
+    getStatic(false),
     getJSON('/OffStreet/ParkingAvailability/City/Taipei'),
     getJSON('/OnStreet/ParkingSegmentAvailability/City/Taipei'),
   ]);
-  const lots = {}, segs = {};
-  for (const p of la.ParkingAvailabilities) {
-    const t = byType(p.Availabilities);
-    if (!t[1] && p.TotalSpaces > 0) t[1] = { n: p.TotalSpaces, a: p.AvailableSpaces };
-    lots[p.CarParkID] = { t, service: p.ServiceStatus };
-  }
-  for (const s of sa.CurbParkingSegmentAvailabilities) {
-    const t = byType(s.Availabilities);
-    if (!t[1] && s.TotalSpaces > 0) t[1] = { n: s.TotalSpaces, a: s.AvailableSpaces };
-    segs[s.ParkingSegmentID] = { t, service: s.ServiceStatus };
-  }
-  return { lots, segs, time: la.SrcUpdateTime || la.UpdateTime };
+  const lots = new Map(la.ParkingAvailabilities.map(p => [p.CarParkID, p]));
+  const segs = new Map(sa.CurbParkingSegmentAvailabilities.map(s => [s.ParkingSegmentID, s]));
+  return {
+    items: [
+      ...st.lots.map(p => ({ ...p, ...spaces(lots.get(p.id)) })),
+      ...st.segs.map(s => ({ ...s, ...spaces(segs.get(s.id)) })),
+    ],
+    time: la.SrcUpdateTime || la.UpdateTime,
+    source: 'direct',
+  };
 }
 
 // ---------- 計算 ----------
 function counts(item) {
-  const c = item.live?.t?.[SPACE[state.veh]];
-  if (!c || c.n == null || c.n <= 0) return null;
-  return { n: c.n, a: c.a == null || c.a < 0 ? null : Math.min(c.a, c.n) };
+  const c = item[state.veh];
+  if (!c || !(c[0] > 0)) return null;
+  return { n: c[0], a: c[1] == null || c[1] < 0 ? null : Math.min(c[1], c[0]) };
 }
 function level(c) {
   if (!c || c.a == null) return 'unknown';
@@ -196,9 +208,9 @@ const layer = L.layerGroup().addTo(map);
 let meMarker = null;
 
 function visible(item) {
-  if (state.kind !== 'all' && item.kind !== state.kind) return false;
+  if (state.kind !== 'all' && item.k !== state.kind) return false;
   if (state.veh === 'motor' && !counts(item)) return false;
-  if (state.q && !(item.name + item.addr).includes(state.q)) return false;
+  if (state.q && !(item.n + item.a).includes(state.q)) return false;
   return true;
 }
 
@@ -206,11 +218,11 @@ function popupHtml(item) {
   const c = counts(item), lv = level(c);
   const num = c ? (c.a == null ? '— / ' + c.n : c.a + ' / ' + c.n) : '無即時資料';
   const nav = `https://www.google.com/maps/dir/?api=1&destination=${item.lat},${item.lon}`;
-  return `<div class="pop"><b>${esc(item.name)}</b><br>
-    <span style="color:var(--muted)">${item.kind === 'lot' ? '停車場' : '路邊停車'} · ${state.veh === 'car' ? '汽車' : '機車'}</span><br>
+  return `<div class="pop"><b>${esc(item.n)}</b><br>
+    <span style="color:var(--muted)">${item.k === 'lot' ? '停車場' : '路邊停車'} · ${state.veh === 'car' ? '汽車' : '機車'}</span><br>
     <span class="pop-count" style="color:${color(lv)}">${num}</span> <span style="color:var(--muted)">剩餘 / 總格數</span><br>
-    ${item.addr ? esc(item.addr) + '<br>' : ''}
-    ${item.fare ? '💲 ' + esc(item.fare) + '<br>' : ''}
+    ${item.a ? esc(item.a) + '<br>' : ''}
+    ${item.f ? '💲 ' + esc(item.f) + '<br>' : ''}
     <a href="${nav}" target="_blank" rel="noopener">🧭 Google 地圖導航</a></div>`;
 }
 
@@ -220,8 +232,8 @@ function render() {
     if (!visible(item)) continue;
     const lv = level(counts(item));
     L.circleMarker([item.lat, item.lon], {
-      radius: item.kind === 'lot' ? 8 : 6, weight: item.kind === 'lot' ? 2 : 1,
-      color: item.kind === 'lot' ? '#ffffff' : color(lv), fillColor: color(lv), fillOpacity: .9,
+      radius: item.k === 'lot' ? 8 : 6, weight: item.k === 'lot' ? 2 : 1,
+      color: item.k === 'lot' ? '#ffffff' : color(lv), fillColor: color(lv), fillOpacity: .9,
     }).bindPopup(() => popupHtml(item)).addTo(layer);
   }
   renderList();
@@ -243,9 +255,9 @@ function renderList() {
     const c = counts(item), lv = level(c);
     const num = c && c.a != null ? c.a : '—';
     return `<li data-i="${state.items.indexOf(item)}">
-      <span class="name">${esc(item.name)}</span>
+      <span class="name">${esc(item.n)}</span>
       <span class="count" style="color:${color(lv)}">${num}<small>${c ? '共 ' + c.n + ' 格' : '無資料'}</small></span>
-      <span class="sub">${item.kind === 'lot' ? '停車場' : '路邊'} · ${fmtDist(d)}${state.me ? '' : '（距地圖中心）'}</span>
+      <span class="sub">${item.k === 'lot' ? '停車場' : '路邊'} · ${fmtDist(d)}${state.me ? '' : '（距地圖中心）'}</span>
     </li>`;
   }).join('');
 }
@@ -299,7 +311,8 @@ function setStatus(msg, err) {
 function statusText() {
   if (!state.updated) return '';
   const t = new Date(state.updated);
-  return '資料時間 ' + t.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' · 按「重新整理」取得最新空位';
+  const hint = state.source === 'file' ? '每 30 分鐘自動更新' : '按「重新整理」取得最新空位';
+  return '資料時間 ' + t.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' }) + ' · ' + hint;
 }
 
 async function refresh() {
@@ -307,12 +320,11 @@ async function refresh() {
   btn.disabled = true;
   setStatus('讀取最新空位中…');
   try {
-    const [st, live] = await Promise.all([getStatic(false), getLive()]);
-    state.items = [
-      ...st.lots.map(p => ({ ...p, kind: 'lot', live: live.lots[p.id] })),
-      ...st.segs.map(s => ({ ...s, kind: 'street', live: live.segs[s.id] })),
-    ].filter(x => x.lat && x.lon);
-    state.updated = live.time;
+    let data;
+    try { data = await getPrebuilt(); } catch { data = await getDirect(); }
+    state.items = data.items.filter(x => x.lat && x.lon);
+    state.updated = data.time;
+    state.source = data.source;
     setStatus(statusText());
     render();
   } catch (e) {
