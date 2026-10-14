@@ -99,6 +99,11 @@ async function getTaipeiOwn() {
   }
 }
 
+// 台澎金馬範圍，用來排除座標填錯的資料
+function inTaiwan(lat, lon) {
+  return lat > 21.8 && lat < 26.5 && lon > 118 && lon < 122.1;
+}
+
 // TWD97 二度分帶（TM2，中央經線 121°）座標轉經緯度
 function twd97ToWgs84(x, y) {
   const a = 6378137, b = 6356752.314245, k0 = 0.9999, lon0 = 121 * Math.PI / 180, dx = 250000;
@@ -143,6 +148,7 @@ async function getNewTaipeiLots() {
       const x = Number(p.TW97X), y = Number(p.TW97Y);
       if (!(x > 0 && y > 0)) continue;
       const [lat, lon] = twd97ToWgs84(x, y);
+      if (!inTaiwan(lat, lon)) continue; // 原始資料座標填錯的略過
       const car = Number(p.TOTALCAR), motor = Number(p.TOTALMOTOR), a = avail.get(p.ID);
       items.push({ k: 'lot', id: 'NTPC' + p.ID, n: p.NAME, lat, lon, a: p.ADDRESS || '', f: (p.PAYEX || '').replace(/;$/, ''),
         ...(car > 0 ? { car: [car, a >= 0 ? a : null] } : {}),
@@ -171,7 +177,7 @@ async function fetchCity(city, token) {
   const items = [];
   for (const p of st.lots) {
     const lat = p.CarParkPosition?.PositionLat, lon = p.CarParkPosition?.PositionLon;
-    if (!lat || !lon) continue;
+    if (!inTaiwan(lat, lon)) continue;
     const sp = spaces(lotMap.get(p.CarParkID));
     const o = own?.map.get(p.CarParkID);
     if (o) {
@@ -189,7 +195,7 @@ async function fetchCity(city, token) {
   }
   for (const s of st.segs) {
     const lat = s.ParkingSegmentPosition?.PositionLat, lon = s.ParkingSegmentPosition?.PositionLon;
-    if (!lat || !lon) continue;
+    if (!inTaiwan(lat, lon)) continue;
     items.push({ k: 'street', id: s.ParkingSegmentID, n: s.ParkingSegmentName?.Zh_tw || s.ParkingSegmentID, lat, lon,
       a: s.Description || '', f: s.FareDescription || '', ...spaces(segMap.get(s.ParkingSegmentID)) });
   }
