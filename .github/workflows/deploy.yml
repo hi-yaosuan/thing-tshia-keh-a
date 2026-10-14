@@ -34,7 +34,7 @@ jobs:
         env:
           TDX_CLIENT_ID: ${{ secrets.TDX_CLIENT_ID }}
           TDX_CLIENT_SECRET: ${{ secrets.TDX_CLIENT_SECRET }}
-          CITIES: Taipei
+          CITIES: Taipei,NewTaipei,Keelung,Taoyuan,Hsinchu,HsinchuCounty,MiaoliCounty,Taichung,ChanghuaCounty,NantouCounty,YunlinCounty,Chiayi,ChiayiCounty,Tainan,Kaohsiung,PingtungCounty,YilanCounty,HualienCounty,TaitungCounty,PenghuCounty,KinmenCounty,LienchiangCounty
         run: |
           mkdir -p site
           cp index.html site/
